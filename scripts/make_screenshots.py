@@ -135,16 +135,6 @@ def quote_of(row, prev_row) -> dict:
     }
 
 
-def _safe_update_status(win: MainWindow) -> None:
-    """ASCII 版状态栏（避开 ✓/✗ 豆腐块，且完全不联网）。"""
-    acct = win.broker.account
-    win.statusBar().showMessage(
-        f"数据源 [akshare 可用]  |  总资产 {acct.total_value:,.2f}  |  "
-        f"可用 {acct.cash:,.2f}  |  持仓市值 {acct.market_value:,.2f}  |  "
-        f"总盈亏 {acct.total_pnl:+,.2f}"
-    )
-
-
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
@@ -167,7 +157,8 @@ def main() -> int:
     win._status_timer.stop()                         # 停状态栏 5s 轮询
     win.trade.timer.stop()                            # 停交易页自动刷新定时器
     win.trade.sync_market = lambda: win.trade.refresh()  # 切到交易页不再拉实时行情
-    win._update_status = lambda: _safe_update_status(win)  # 状态栏不联网、无 ✓/✗
+    # 注：_update_status 只读 dm.source_label()（内存健康标记）+ broker.account，
+    # 本身不联网、不用 ✓/✗，无需再打补丁。
 
     win.resize(1280, 800)
     win.show()

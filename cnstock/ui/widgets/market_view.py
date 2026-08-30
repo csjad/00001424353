@@ -13,7 +13,6 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -216,8 +215,22 @@ class MarketView(QWidget):
         self._refresh_quote(symbol)
 
     def _on_error(self, msg: str) -> None:
+        """取数失败：只在界面内 + 状态栏提示，**不弹模态框**。
+
+        离线时该回调会被反复触发（自动刷新、切周期、点自选），
+        每次弹 QMessageBox 会让界面变得不可用。
+        """
         self.title_label.setText(f"加载失败：{msg[:60]}")
-        QMessageBox.warning(self, "行情加载失败", msg)
+        self._hint_status(f"行情加载失败：{msg[:120]}")
+
+    def _hint_status(self, text: str, timeout: int = 8000) -> None:
+        """往主窗口状态栏写一条非阻塞提示（拿不到状态栏则静默）。"""
+        bar = getattr(self.window(), "statusBar", None)
+        if callable(bar):
+            try:
+                bar().showMessage(text, timeout)
+            except Exception:  # pragma: no cover
+                pass
 
     def _refresh_quote(self, symbol: str) -> None:
         """用实时行情刷新盘口与名称（失败时静默）。"""

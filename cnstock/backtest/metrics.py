@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
+
+from ..core.models import Metrics
 
 #: A 股年化交易日数
 TRADING_DAYS_PER_YEAR: int = 252
@@ -133,8 +135,6 @@ def compute_metrics(
     :param benchmark_return: 基准收益率（买入持有）
     :param rf_annual: 年化无风险利率
     """
-    from ..core.models import Metrics
-
     if not equity_curve:
         return Metrics(initial_cash=initial_cash, final_value=initial_cash)
 

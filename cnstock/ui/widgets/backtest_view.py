@@ -11,13 +11,11 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import numpy as np
-import pandas as pd
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QComboBox,
-    QDateEdit,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
@@ -39,7 +37,7 @@ from ...data.manager import DataManager
 from ...backtest.engine import BacktestEngine
 from ...backtest.strategies import STRATEGY_REGISTRY, get_strategy
 from ..chart import DateAxisItem
-from ..theme import ACCENT, BG, BORDER, DOWN, TEXT_2, UP
+from ..theme import BG, BORDER, DOWN, TEXT_2, UP
 from ..worker import Worker
 
 
@@ -283,9 +281,15 @@ class BacktestView(QWidget):
         )
 
     def _on_error(self, msg: str) -> None:
+        """回测失败：界面内提示 + 状态栏，**不弹模态框**（离线时会频繁触发）。"""
         self.run_btn.setEnabled(True)
         self.status_label.setText(f"回测失败：{msg[:80]}")
-        QMessageBox.warning(self, "回测失败", msg)
+        bar = getattr(self.window(), "statusBar", None)
+        if callable(bar):
+            try:
+                bar().showMessage(f"回测失败：{msg[:120]}", 8000)
+            except Exception:  # pragma: no cover
+                pass
 
     # ============================================================
     # 渲染

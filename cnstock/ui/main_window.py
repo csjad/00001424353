@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -16,7 +15,6 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
-    QLabel,
     QLineEdit,
     QListWidget,
     QMainWindow,
@@ -31,7 +29,6 @@ from PyQt6.QtWidgets import (
 from ..core.config import AppConfig, load_config, save_config
 from ..data.manager import DataManager
 from ..engine.broker import SimBroker
-from .theme import ACCENT, TEXT_2
 from .widgets.backtest_view import BacktestView
 from .widgets.market_view import MarketView
 from .widgets.trade_view import TradeView
@@ -108,11 +105,11 @@ class MainWindow(QMainWindow):
 
     def _update_status(self) -> None:
         acct = self.broker.account
-        token_ok = bool(self.cfg.data.tushare_token)
-        providers = self.dm.provider_status()
-        src = " / ".join(
-            f"{n}{'✓' if ok else '✗'}" for n, ok in providers.items()
-        )
+        # 用真实取数结果（在线/离线/待测试），而非"是否配置"，
+        # 避免断网时状态栏仍显示可用、点哪都失败却看不出原因。
+        src = self.dm.source_label()
+        if self.cfg.data.fallback and self.cfg.data.tushare_token:
+            src += " / tushare 已配置"
         self.statusBar().showMessage(
             f"数据源 [{src}]  |  总资产 {acct.total_value:,.2f}  |  "
             f"可用 {acct.cash:,.2f}  |  持仓市值 {acct.market_value:,.2f}  |  "

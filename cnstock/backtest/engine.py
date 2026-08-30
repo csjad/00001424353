@@ -27,7 +27,7 @@ from ..core.constants import (
     round_price,
     sell_fee,
 )
-from ..core.models import BacktestResult, Metrics, Trade
+from ..core.models import BacktestResult, Trade
 from .metrics import compute_metrics
 from .strategy import BacktestContext, Signal, Strategy
 

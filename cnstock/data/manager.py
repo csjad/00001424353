@@ -52,6 +52,10 @@ class DataManager:
         self._list_cache: pd.DataFrame | None = None
         self._list_ts: float = 0.0
 
+        # 最近一次取数的健康状态：None=尚未尝试 / True=成功 / False=失败
+        self._last_ok: bool | None = None
+        self._last_error: str = ""
+
     # ============================================================
     # 配置热更新
     # ============================================================
@@ -72,6 +76,24 @@ class DataManager:
     # ============================================================
 
     def daily(
+        self,
+        symbol: str,
+        start: str = "",
+        end: str = "",
+        adjust: str = ADJUST_QFQ,
+        use_cache: bool = True,
+        period: str = "daily",
+    ) -> pd.DataFrame:
+        """取日线，并同步记录数据源健康状态。"""
+        try:
+            df = self._daily_impl(symbol, start, end, adjust, use_cache, period)
+        except Exception as exc:
+            self._mark_fail(str(exc))
+            raise
+        self._mark_ok()
+        return df
+
+    def _daily_impl(
         self,
         symbol: str,
         start: str = "",
@@ -156,6 +178,16 @@ class DataManager:
     # ============================================================
 
     def realtime(self, symbols: Iterable[str], force: bool = False) -> pd.DataFrame:
+        """取实时行情，并同步记录数据源健康状态。"""
+        try:
+            df = self._realtime_impl(symbols, force)
+        except Exception as exc:
+            self._mark_fail(str(exc))
+            raise
+        self._mark_ok()
+        return df
+
+    def _realtime_impl(self, symbols: Iterable[str], force: bool = False) -> pd.DataFrame:
         wanted = [self._sym(s) for s in symbols if s]
         if not wanted:
             return pd.DataFrame()
@@ -244,7 +276,38 @@ class DataManager:
     # ============================================================
 
     def provider_status(self) -> dict[str, bool]:
+        """配置层面的可用性（是否已安装/已配置 token），不代表网络连通。"""
         return {name: p.is_available() for name, p in self.providers.items()}
+
+    # ============================================================
+    # 数据源健康状态（供状态栏展示真实联网情况）
+    # ============================================================
+
+    def _mark_ok(self) -> None:
+        self._last_ok = True
+        self._last_error = ""
+
+    def _mark_fail(self, msg: str) -> None:
+        self._last_ok = False
+        self._last_error = msg
+
+    def source_label(self) -> str:
+        """
+        返回人类可读的数据源状态文案。
+
+        与 ``provider_status()`` 的区别：后者只反映"是否配置"，
+        这里反映**最近一次真实取数是成功还是失败**，避免离线时状态栏仍显示"可用"。
+        """
+        name = self.primary.name
+        if self._last_ok is None:
+            return f"{name} 待测试"
+        if self._last_ok:
+            return f"{name} 在线"
+        return f"{name} 离线"
+
+    @property
+    def last_error(self) -> str:
+        return self._last_error
 
     def clear_cache(self, symbol: str | None = None) -> int:
         self._rt_cache = None

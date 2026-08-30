@@ -30,7 +30,6 @@ Windows CMD 解析 .bat 时按系统 codepage（中文系统一般为 GBK/936）
 """
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import sys
