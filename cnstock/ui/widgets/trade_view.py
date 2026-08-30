@@ -48,6 +48,11 @@ class TradeView(QWidget):
         self.dm = dm
         self.cfg = cfg or load_config()
         self._price_worker: Worker | None = None
+        self._sync_worker: Worker | None = None
+        self._submit_worker: Worker | None = None
+        # 最近一次成功获取的完整行情快照（symbol -> quote dict），
+        # 下单时直接复用，避免每次点击都发起一次全市场快照请求。
+        self._last_quote: dict[str, dict] = {}
         self._init_ui()
 
         self.timer = QTimer(self)
@@ -207,19 +212,38 @@ class TradeView(QWidget):
         if not symbol:
             return
         self.code_edit.setText(symbol)
+        self._fetch_quote(symbol)
+
+    def _fetch_quote(self, symbol: str) -> None:
+        """子线程拉取单只股票行情，避免阻塞界面。"""
         self._price_worker = Worker(self.dm.realtime, [symbol])
         self._price_worker.finished.connect(self._on_price_loaded)
         self._price_worker.error.connect(lambda _e: None)
         self._price_worker.start()
 
+    @staticmethod
+    def _row_to_quote(row: Any, symbol: str) -> dict:
+        """把实时快照行转成撮合引擎需要的行情 dict。"""
+        return {
+            "symbol": str(symbol).strip()[-6:],
+            "name": str(row.get("name", "") or ""),
+            "price": float(row.get("price", 0.0) or 0.0),
+            "open": float(row.get("open", 0.0) or 0.0),
+            "high": float(row.get("high", 0.0) or 0.0),
+            "low": float(row.get("low", 0.0) or 0.0),
+            "prev_close": float(row.get("prev_close", 0.0) or 0.0),
+        }
+
     def _on_price_loaded(self, df: Any) -> None:
         if df is None or df.empty:
             return
         row = df.iloc[0]
-        self.name_label.setText(str(row.get("name", "") or ""))
-        price = float(row.get("price", 0.0) or 0.0)
-        if price > 0:
-            self.price_edit.setValue(price)
+        sym = str(row.get("symbol", self.code_edit.text().strip())).strip()[-6:]
+        quote = self._row_to_quote(row, sym)
+        self._last_quote[sym] = quote
+        self.name_label.setText(quote["name"] or sym)
+        if quote["price"] > 0:
+            self.price_edit.setValue(quote["price"])
 
     # ============================================================
     # 下单
@@ -242,18 +266,73 @@ class TradeView(QWidget):
         )
         price = self.price_edit.value() if order_type == OrderType.LIMIT else 0.0
 
-        order = self.broker.submit_order(
-            symbol, side, qty, price=price, order_type=order_type
-        )
+        quote = self._last_quote.get(symbol)
+        if quote is not None:
+            # 已有行情快照：直接同步撮合，零网络、零等待
+            self._do_submit(side, symbol, qty, price, order_type, quote)
+        else:
+            # 无缓存行情：子线程拉取后再撮合，界面不冻结
+            self._set_submit_busy(True)
+            self.tip_label.setText(f"正在获取 {symbol} 行情…")
+            self._submit_worker = Worker(self.dm.realtime, [symbol])
+            self._submit_worker.finished.connect(
+                lambda df, s=side, q=qty, p=price, ot=order_type: (
+                    self._set_submit_busy(False),
+                    self._on_submit_quote(df, s, symbol, q, p, ot),
+                )
+            )
+            self._submit_worker.error.connect(
+                lambda e, s=side, q=qty, p=price, ot=order_type: (
+                    self._set_submit_busy(False),
+                    self.tip_label.setText(f"获取行情失败：{str(e)[:80]}"),
+                )
+            )
+            self._submit_worker.start()
 
+    def _on_submit_quote(
+        self,
+        df: Any,
+        side: OrderSide,
+        symbol: str,
+        qty: int,
+        price: float,
+        order_type: OrderType,
+    ) -> None:
+        """行情拉取回来后的下单入口。"""
+        quote = None
+        if df is not None and not df.empty:
+            quote = self._row_to_quote(df.iloc[0], symbol)
+            self._last_quote[symbol] = quote
+        self._do_submit(side, symbol, qty, price, order_type, quote)
+
+    def _do_submit(
+        self,
+        side: OrderSide,
+        symbol: str,
+        qty: int,
+        price: float,
+        order_type: OrderType,
+        quote: dict | None,
+    ) -> None:
+        if quote is None:
+            self.tip_label.setText("无可用行情，无法撮合（数据源离线或冷却中）")
+            return
+        order = self.broker.submit_order(
+            symbol, side, qty, price=price, order_type=order_type, quote=quote
+        )
         if order.status == OrderStatus.REJECTED:
             QMessageBox.warning(self, "委托被拒", order.message)
         elif order.status == OrderStatus.FILLED:
-            self.tip_label.setText(f"已成交：{side.value} {qty} 股 @ {order.filled_amount / qty:.2f}" if qty else "")
+            self.tip_label.setText(
+                f"已成交：{side.value} {qty} 股 @ {order.filled_amount / qty:.2f}" if qty else ""
+            )
         else:
             self.tip_label.setText(order.message)
-
         self.refresh()
+
+    def _set_submit_busy(self, busy: bool) -> None:
+        self.buy_btn.setEnabled(not busy)
+        self.sell_btn.setEnabled(not busy)
 
     def _apply_quick_buy(self, pct: int) -> None:
         """按可用资金比例估算买入股数（向下取整到 100 股）。"""
@@ -310,11 +389,38 @@ class TradeView(QWidget):
     # ============================================================
 
     def sync_market(self) -> None:
-        """刷新持仓最新价并重绘。"""
-        try:
-            self.broker.sync_market()
-        except Exception as exc:
-            self.tip_label.setText(f"行情刷新失败：{exc}"[:60])
+        """刷新持仓最新价并重绘。
+
+        行情拉取放子线程执行，界面不冻结；上一次未返回时跳过本次，
+        避免离线时定时器堆积出一串注定失败的请求。
+        """
+        syms: list[str] = [p.symbol for p in self.broker.positions]
+        code = self.code_edit.text().strip()
+        if code and code not in syms:
+            syms.append(code)
+        if not syms:
+            self.refresh()
+            return
+        if self._sync_worker is not None and self._sync_worker.isRunning():
+            return
+        self._sync_worker = Worker(self.dm.realtime, syms)
+        self._sync_worker.finished.connect(self._on_market_loaded)
+        self._sync_worker.error.connect(
+            lambda e: (
+                self.tip_label.setText(f"行情刷新失败：{str(e)[:60]}"),
+                self.refresh(),
+            )
+        )
+        self._sync_worker.start()
+
+    def _on_market_loaded(self, df: Any) -> None:
+        if df is not None and not df.empty:
+            # 顺带更新行情缓存，供下单时零网络撮合
+            for row in df.to_dict("records"):
+                sym = str(row.get("symbol", "")).strip()[-6:]
+                if sym:
+                    self._last_quote[sym] = self._row_to_quote(row, sym)
+            self.broker.refresh_prices(df)
         self.refresh()
 
     def refresh(self) -> None:

@@ -31,6 +31,9 @@ logger = logging.getLogger(__name__)
 class DataManager:
     """行情数据统一调度入口。"""
 
+    #: 实时行情连续失败后的快速失败冷却窗口（秒）
+    FAIL_COOLDOWN: int = 10
+
     def __init__(self, cfg: AppConfig | None = None) -> None:
         self.cfg = cfg or load_config()
         dcfg = self.cfg.data
@@ -55,6 +58,7 @@ class DataManager:
         # 最近一次取数的健康状态：None=尚未尝试 / True=成功 / False=失败
         self._last_ok: bool | None = None
         self._last_error: str = ""
+        self._last_fail_ts: float = 0.0
 
     # ============================================================
     # 配置热更新
@@ -178,7 +182,23 @@ class DataManager:
     # ============================================================
 
     def realtime(self, symbols: Iterable[str], force: bool = False) -> pd.DataFrame:
-        """取实时行情，并同步记录数据源健康状态。"""
+        """取实时行情，并同步记录数据源健康状态。
+
+        连续失败后进入 ``FAIL_COOLDOWN`` 秒的快速失败窗口：期间除显式
+        ``force=True`` 外直接抛错，不再重复发起注定失败的网络请求。
+        否则离线时每次自动刷新 / 下单都会白等一个完整超时，界面看起来像卡死。
+        """
+        now = time.time()
+        if (
+            not force
+            and self._last_ok is False
+            and self._last_error
+            and (now - self._last_fail_ts) < self.FAIL_COOLDOWN
+        ):
+            raise DataError(
+                f"数据源 {self.primary.name} 离线，{self.FAIL_COOLDOWN}s 冷却中"
+                f"（上次失败：{self._last_error[:60]}）"
+            )
         try:
             df = self._realtime_impl(symbols, force)
         except Exception as exc:
@@ -286,10 +306,12 @@ class DataManager:
     def _mark_ok(self) -> None:
         self._last_ok = True
         self._last_error = ""
+        self._last_fail_ts = 0.0
 
     def _mark_fail(self, msg: str) -> None:
         self._last_ok = False
         self._last_error = msg
+        self._last_fail_ts = time.time()
 
     def source_label(self) -> str:
         """
