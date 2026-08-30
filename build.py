@@ -27,6 +27,8 @@ Windows CMD 解析 .bat 时按系统 codepage（中文系统一般为 GBK/936）
 用法
 ----
 直接双击 ``build.bat``；或手工执行：``python build.py``。
+打包前会自动跑 ``scripts/_smoke.py`` 与 ``scripts/_verify.py`` 两套自检，
+任一未通过即中止（用 ``python build.py --skip-tests`` 跳过）。
 """
 from __future__ import annotations
 
@@ -111,9 +113,41 @@ def run_pyinstaller(py: str) -> int:
     return subprocess.call(cmd, cwd=str(ROOT))
 
 
+def run_prebuild_tests(py: str) -> int:
+    """打包前跑一遍本地自检，失败则中止，避免把坏版本发出去。
+
+    两个脚本都是离线可跑、断言式、失败非零退出：
+      - scripts/_smoke.py   核心逻辑（撮合 / 回测 / 绩效指标）
+      - scripts/_verify.py  持久化往返 / 交易视图渲染 / 数据源失败冷却
+
+    用 ``--skip-tests`` 可跳过（例如 CI 里已有独立测试步骤时）。
+    """
+    scripts = ["scripts/_smoke.py", "scripts/_verify.py"]
+    for rel in scripts:
+        path = ROOT / rel
+        if not path.exists():
+            info(f"跳过 {rel}（文件不存在）")
+            continue
+        info(f"打包前自检：{rel}")
+        rc = subprocess.call([py, str(path)], cwd=str(ROOT))
+        if rc != 0:
+            print(f"\n!!! {rel} 未通过（退出码 {rc}），已中止打包", flush=True)
+            return rc
+    return 0
+
+
 def main() -> int:
+    skip_tests = "--skip-tests" in sys.argv[1:]
+
     py = resolve_python()
     info(f"使用 Python: {py}")
+
+    if not skip_tests:
+        rc = run_prebuild_tests(py)
+        if rc != 0:
+            return rc
+    else:
+        info("跳过打包前自检（--skip-tests）")
 
     ensure_pyinstaller(py)
     clean_previous()
