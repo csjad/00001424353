@@ -23,7 +23,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Iterable
+from threading import Thread
+from typing import Any, Callable, Iterable
 
 import pandas as pd
 
@@ -47,6 +48,47 @@ ADJUST_HFQ = "hfq"
 
 class DataError(Exception):
     """数据源异常（网络失败、接口变动、无数据等）。"""
+
+
+def run_with_timeout(fn: Callable[..., Any], timeout: float, *args: Any, **kwargs: Any) -> Any:
+    """在守护线程执行 ``fn``，最多等 ``timeout`` 秒。
+
+    用途：第三方行情库（如 akshare）内部直接用 ``requests.get`` 且不暴露
+    ``timeout`` 参数，一条挂死的连接会一直阻塞到 TCP 超时（可达 130 秒+），
+    把整个请求链路拖死。这里用线程兜住等待时长。
+
+    实现取舍：用 ``daemon=True`` 的裸线程，而**不是** ``ThreadPoolExecutor``。
+    后者工作线程是 non-daemon，Python 3.9+ 在解释器退出时 ``atexit`` 会 join
+    它们——届时一条被黑洞掉的连接能把应用退出拖住 130 秒。守护线程在解释器
+    退出时被直接丢弃，不影响关闭。
+
+    注意：Python 无法强杀已阻塞在 socket 上的线程，超时后底层线程会继续跑到
+    自然失败再自行退出（表现为轻微线程泄漏）。泄漏量受上层
+    ``DataManager.FAIL_COOLDOWN`` 限制——冷却期内不会重复发起注定失败的请求。
+
+    :param fn: 目标可调用对象
+    :param timeout: 等待秒数；``<= 0`` 表示不限时（直接同步调用）
+    :raises DataError: 超过 ``timeout`` 仍未返回
+    """
+    if timeout is None or timeout <= 0:
+        return fn(*args, **kwargs)
+
+    box: dict[str, Any] = {}
+
+    def _runner() -> None:
+        try:
+            box["result"] = fn(*args, **kwargs)
+        except BaseException as exc:  # 原样穿透，由调用方感知
+            box["error"] = exc
+
+    t = Thread(target=_runner, daemon=True, name="dataprovider-timeout")
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise DataError(f"数据请求超时（>{timeout:g}s）") from None
+    if "error" in box:
+        raise box["error"]
+    return box.get("result")
 
 
 class DataProvider(ABC):

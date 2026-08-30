@@ -20,6 +20,7 @@ from .base import (
     DataProvider,
     normalize_daily,
     normalize_realtime,
+    run_with_timeout,
 )
 
 #: akshare 日线原始列名 -> 统一 schema
@@ -110,7 +111,9 @@ class AkShareProvider(DataProvider):
             period = "daily"
 
         try:
-            raw = self.ak.stock_zh_a_hist(
+            raw = run_with_timeout(
+                self.ak.stock_zh_a_hist,
+                self.timeout,
                 symbol=symbol,
                 period=period,
                 start_date=start,
@@ -137,8 +140,10 @@ class AkShareProvider(DataProvider):
             raise DataError(f"不支持的分钟周期：{period}")
 
         try:
-            raw = self.ak.stock_zh_a_hist_min_em(
-                symbol=symbol, period=period, adjust=adjust or ""
+            raw = run_with_timeout(
+                self.ak.stock_zh_a_hist_min_em,
+                self.timeout,
+                symbol=symbol, period=period, adjust=adjust or "",
             )
         except Exception as exc:
             raise DataError(f"[akshare] 获取 {symbol} {period}分钟线失败：{exc}") from exc
@@ -172,7 +177,7 @@ class AkShareProvider(DataProvider):
             return self._spot_df
 
         try:
-            raw = self.ak.stock_zh_a_spot_em()
+            raw = run_with_timeout(self.ak.stock_zh_a_spot_em, self.timeout)
         except Exception as exc:
             # 缓存兜底：上游挂了，返回旧数据而不是直接抛错
             if self._spot_df is not None:
@@ -197,7 +202,7 @@ class AkShareProvider(DataProvider):
             return self._list_df
 
         try:
-            raw = self.ak.stock_info_a_code_name()
+            raw = run_with_timeout(self.ak.stock_info_a_code_name, self.timeout)
             df = raw.rename(columns={"code": "symbol", "name": "name"})
             df["symbol"] = df["symbol"].astype(str).str[-6:]
             df = df[["symbol", "name"]]
