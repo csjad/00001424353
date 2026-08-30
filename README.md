@@ -61,6 +61,23 @@ build.bat
 
 ---
 
+## 自动构建（GitHub Actions）
+
+仓库已内置 `.github/workflows/build.yml`：
+
+- 推送 `v*` 标签（如 `v1.0.0`）或在 Actions 页手动触发，**自动在 Windows runner 上打包 `A股模拟交易终端.exe`**；
+- tag 触发时自动发布到对应 GitHub Release（作为附件上传），并生成变更说明；
+- 任意触发都会保留一次构建产物（Artifact）供下载。
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+> 本地已有的 `dist/A股模拟交易终端.exe`（≈124MB）可直接手动上传到 Release，无需等待 CI。
+
+---
+
 ## 命令行回测（无需 GUI）
 
 ```bash
@@ -86,7 +103,8 @@ cn-stock-desktop/
 ├── requirements.txt
 ├── requirements-build.txt
 ├── run.bat
-└── build.bat
+├── build.bat
+└── .github/workflows/build.yml   # GitHub Actions：自动打包并发布 exe
 ```
 
 ---
