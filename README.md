@@ -6,6 +6,17 @@
 
 ---
 
+## 界面预览
+
+| 总览（行情中心） | 模拟交易 | 量化回测 |
+|:---:|:---:|:---:|
+| ![总览](docs/screenshots/00-overview.png) | ![模拟交易](docs/screenshots/02-trade.png) | ![量化回测](docs/screenshots/03-backtest.png) |
+| ![行情看盘](docs/screenshots/01-market.png) | | |
+
+暗色金融主题、涨红跌绿 A 股配色；K 线 + 均线 + 成交量叠合；盘口实时更新。
+
+---
+
 ## 功能特性
 
 | 模块 | 能力 |
@@ -98,14 +109,29 @@ cn-stock-desktop/
 │   ├── backtest/      # 回测引擎、策略库、绩效指标
 │   ├── storage/       # SQLite 持久化
 │   ├── ui/            # 主题、K线图表、主窗口、三个业务视图
-│   └── main.py        # 应用入口
-├── scripts/cli_demo.py
+│   │   └── widgets/   # 行情 / 交易 / 回测 三个视图
+│   ├── __main__.py    # python -m cnstock 入口
+│   └── main.py        # 应用主入口（setup logging + QApp + MainWindow）
+├── scripts/
+│   ├── cli_demo.py    # 命令行回测（无需 GUI）
+│   └── make_screenshots.py  # README 截图生成（离屏、零联网）
+├── docs/
+│   └── screenshots/   # README 截图（00-overview / 01-market / 02-trade / 03-backtest）
+├── launcher.py        # PyInstaller 冻结入口（修复包内相对导入）
+├── build.py           # PyInstaller 打包脚本（绕过 Windows .bat 中文 codepage 炸）
+├── run.py             # 首启建 venv + 装依赖 + 启动
+├── build.bat          # 纯 ASCII 引导：调用 build.py
+├── run.bat            # 纯 ASCII 引导：调用 run.py
 ├── requirements.txt
 ├── requirements-build.txt
-├── run.bat
-├── build.bat
 └── .github/workflows/build.yml   # GitHub Actions：自动打包并发布 exe
 ```
+
+> **README 截图如何本地重新生成**：
+> ```bash
+> python scripts/make_screenshots.py   # 输出到 docs/screenshots/
+> ```
+> 完全离屏运行、不联网、不写用户真实账户库。
 
 ---
 

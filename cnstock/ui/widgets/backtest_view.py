@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QComboBox,
     QDateEdit,
