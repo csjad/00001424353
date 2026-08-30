@@ -14,7 +14,7 @@ pyinstaller --noconfirm --onefile --windowed --name "A股模拟交易终端" ^
   --collect-all PyQt6 ^
   --collect-all akshare ^
   --collect-all tushare ^
-  cnstock\main.py
+  launcher.py
 
 if exist "dist\A股模拟交易终端.exe" (
     echo.
