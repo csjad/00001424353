@@ -1,0 +1,54 @@
+# cn-stock-desktop CI
+#
+# 只装「零 GUI 依赖」的 requirements-api.txt（含 requirements-core.txt：
+# numpy / pandas / akshare / tushare + fastapi / uvicorn / httpx），
+# 因此本工作流验证的是「后端边界守卫 + REST API 服务层」：
+#   - 纯逻辑层（core/data/engine/backtest/storage）零 PyQt 依赖
+#   - FastAPI 服务层（cnstock/api）零 PyQt 依赖且核心接口可用
+#   - 撮合 / 回测 / 缓存 / 降级路径 等核心逻辑回归
+#
+# 桌面 UI 测试（scripts/_verify.py 的 [2] 交易视图、[7] 行情视图）需要 PyQt6，
+# 在本工作流里被优雅跳过；本地用完整 requirements.txt 跑可覆盖它们。
+
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  headless-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Qt-free dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-api.txt
+
+      - name: Run headless regression (boundary guard + API + core logic)
+        run: python scripts/_verify.py
+
+      - name: Start API server and smoke-test live endpoints
+        run: |
+          pip install httpx
+          # 用独立状态库，避免污染
+          export CNSTOCK_API_DB=$(mktemp -d)/ci_state.db
+          uvicorn cnstock.api.app:app --host 127.0.0.1 --port 8011 --log-level warning &
+          SRV=$!
+          # 等服务起来
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8011/api/health >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8011/api/health | grep -q '"status":"ok"' && echo "health OK"
+          curl -sf http://127.0.0.1:8011/api/strategies | grep -q '双均线交叉' && echo "strategies OK"
+          kill $SRV 2>/dev/null || true

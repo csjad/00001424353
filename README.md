@@ -235,12 +235,27 @@ python -m cnstock.api                 # 默认 :8000，交互式文档见 http:/
 
 > 离线环境下下单必须随请求携带 `quote: {price, prev_close, name?}`，否则以「未获取到行情」拒单。
 
+客户端示例（stdlib-only，零额外依赖，打满全部 13 个端点）：
+
+```bash
+python -m cnstock.api                              # 终端 A：起服务（默认 :8000）
+python examples/api_client.py                      # 终端 B：跑客户端示例
+# 自定义地址：CNSTOCK_API_URL=http://127.0.0.1:8123 python examples/api_client.py
+```
+
 无头验证（含 API 层）：
 
 ```bash
-python scripts/_verify.py      # [8] 后端边界守卫 + [9] API 层无头冒烟，共 31 项断言
+python scripts/_verify.py      # [8] 后端边界守卫 + [9] API 层无头冒烟；本地全量 31 项断言
 python scripts/api_smoke.py     # 单独跑 API 层无头冒烟（自带 Qt 阻断器）
 ```
+
+> `_verify.py` 的 [2] 交易视图、[7] 行情视图是桌面 UI 测试，需要 PyQt6。
+> 在只装 `requirements-api.txt` 的环境（CI / 服务端镜像）里会被**优雅跳过**，
+> 此时回归覆盖边界守卫 + API + 核心逻辑（撮合 / 回测 / 缓存 / 降级路径）。
+
+CI：`.github/workflows/ci.yml` 仅装 `requirements-api.txt`，每次 push/PR 跑
+`scripts/_verify.py` 并用真实 uvicorn 起服务冒烟 `/api/health`、`/api/strategies`。
 
 逻辑层无需改动即可复用——这正是分层的目的。
 
