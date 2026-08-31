@@ -71,9 +71,13 @@ class AkShareProvider(DataProvider):
     name = "akshare"
     support_minute = True
 
-    def __init__(self, timeout: int = 20, spot_ttl: int = 10) -> None:
+    def __init__(self, timeout: int = 20, spot_ttl: int = 30) -> None:
         self.timeout = timeout
-        self.spot_ttl = spot_ttl          # 全市场快照缓存秒数
+        #: 全市场快照缓存秒数。**必须 >= DataManager 的
+        #: ``realtime_ttl_seconds``（默认 15）**，否则每次刷新都会穿透到网络——
+        #: 而一次 ``stock_zh_a_spot_em`` 就是约 59 个分页 HTTP 请求。
+        #: 真正生效的值由 ``DataManager`` 从 ``DataConfig.spot_ttl_seconds`` 传入。
+        self.spot_ttl = spot_ttl
         self._ak = None
         self._spot_df: pd.DataFrame | None = None
         self._spot_ts: float = 0.0
@@ -207,12 +211,23 @@ class AkShareProvider(DataProvider):
             df["symbol"] = df["symbol"].astype(str).str[-6:]
             df = df[["symbol", "name"]]
         except Exception:
-            # 兜底：从实时快照里抽取代码与名称
-            try:
-                spot = self._spot_snapshot()
-                df = spot[["symbol", "name"]].copy()
-            except Exception as exc:
-                raise DataError(f"[akshare] 获取股票列表失败：{exc}") from exc
+            # 兜底：复用**已在内存中**的实时快照抽取代码与名称。
+            #
+            # 注意这里刻意不去调 _spot_snapshot() 触发新的网络请求：
+            # stock_zh_a_spot_em 是约 5900 只票按每页 100 条分页的接口，
+            # 拉一次就是 59 个 HTTP 请求，远比主路径 stock_info_a_code_name
+            # （1 次请求）昂贵。降级路径比主路径还贵是不合理的——
+            # 主路径失败时通常意味着网络有问题，此时更应该快速失败，
+            # 而不是转头去发起一轮更重的请求。
+            #
+            # 若快照此前已被 realtime() 拉过（缓存未过期），这里可以零成本复用。
+            if self._spot_df is not None and not self._spot_df.empty:
+                df = self._spot_df[["symbol", "name"]].copy()
+            else:
+                raise DataError(
+                    "[akshare] 获取股票列表失败：stock_info_a_code_name 不可用，"
+                    "且无内存快照可复用（不会为此触发全市场快照拉取）"
+                ) from None
 
         df = df.dropna(subset=["symbol"]).drop_duplicates("symbol")
         self._list_df = df.reset_index(drop=True)

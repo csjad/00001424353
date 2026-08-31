@@ -41,7 +41,10 @@ class DataManager:
         self.cache = KlineCache(db_path().parent / "kline.db")
 
         self.providers: dict[str, DataProvider] = {
-            "akshare": AkShareProvider(timeout=dcfg.request_timeout),
+            "akshare": AkShareProvider(
+                timeout=dcfg.request_timeout,
+                spot_ttl=dcfg.spot_ttl_seconds,
+            ),
             "tushare": TushareProvider(token=dcfg.tushare_token, timeout=dcfg.request_timeout),
         }
 
@@ -72,6 +75,9 @@ class DataManager:
         if ts.token != dcfg.tushare_token:
             ts.token = dcfg.tushare_token
             ts.reset()
+        # 快照 TTL 也可热更新（改配置后无需重启）
+        ak: AkShareProvider = self.providers["akshare"]  # type: ignore[assignment]
+        ak.spot_ttl = dcfg.spot_ttl_seconds
         self.primary = self.providers.get(dcfg.primary) or self.providers["akshare"]
         self.fallback = self.providers.get(dcfg.fallback)
 

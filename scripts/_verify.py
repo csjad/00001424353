@@ -265,10 +265,174 @@ def test_offline_cooldown() -> None:
 
 
 # ============================================================
+# [4] 全市场快照缓存：TTL 对齐与降级路径开销
+# ============================================================
+
+def _fake_spot_frame() -> "pd.DataFrame":
+    """构造一份符合 akshare stock_zh_a_spot_em 输出形态的假数据。"""
+    import pandas as pd
+
+    return pd.DataFrame(
+        [
+            {
+                "代码": "600519", "名称": "贵州茅台", "最新价": 1680.0,
+                "今开": 1660.0, "最高": 1690.0, "最低": 1655.0, "昨收": 1650.0,
+                "涨跌额": 30.0, "涨跌幅": 1.82, "成交量": 12345.0,
+                "成交额": 2.07e8, "换手率": 0.98,
+            },
+            {
+                "代码": "000001", "名称": "平安银行", "最新价": 11.5,
+                "今开": 11.4, "最高": 11.6, "最低": 11.3, "昨收": 11.45,
+                "涨跌额": 0.05, "涨跌幅": 0.44, "成交量": 987654.0,
+                "成交额": 1.13e9, "换手率": 0.51,
+            },
+        ]
+    )
+
+
+class _FakeAk:
+    """只暴露被测代码会用到的两个接口，并统计各自被调用次数。"""
+
+    def __init__(self, list_ok: bool = True) -> None:
+        self.spot_calls = 0
+        self.list_calls = 0
+        self._list_ok = list_ok
+
+    def stock_zh_a_spot_em(self) -> "pd.DataFrame":
+        # 全市场快照：约 5900 只票按 pz=100 分页，一次就是 59 个 HTTP 请求。
+        self.spot_calls += 1
+        return _fake_spot_frame()
+
+    def stock_info_a_code_name(self) -> "pd.DataFrame":
+        import pandas as pd
+
+        self.list_calls += 1
+        if not self._list_ok:
+            raise RuntimeError("模拟：stock_info_a_code_name 不可用")
+        return pd.DataFrame([{"code": "600519", "name": "贵州茅台"},
+                             {"code": "000001", "name": "平安银行"}])
+
+
+def test_snapshot_cache() -> None:
+    """快照缓存的 TTL 必须 >= manager 的实时 TTL，否则缓存形同虚设。
+
+    背景：``stock_zh_a_spot_em`` 是分页接口，一次调用约 59 个 HTTP 请求
+    （约 5900 只票 / 每页 100 条）。此前 provider 的 ``spot_ttl`` 硬编码 10s，
+    而 manager 的 ``realtime_ttl_seconds`` 是 15s——provider 缓存永远先过期，
+    每次刷新都真实穿透，一分钟能吃掉 200+ 个请求。
+    """
+    print("[4] 全市场快照缓存")
+    from cnstock.core.config import DataConfig
+    from cnstock.data.akshare_provider import AkShareProvider
+
+    cfg = load_config()
+
+    # --- 4.1 配置层面的对齐 ---
+    assert cfg.data.spot_ttl_seconds >= cfg.data.realtime_ttl_seconds, (
+        f"spot_ttl_seconds({cfg.data.spot_ttl_seconds}) 必须 >= "
+        f"realtime_ttl_seconds({cfg.data.realtime_ttl_seconds})，"
+        "否则 provider 层缓存会先于 manager 层过期，缓存永远命中不了"
+    )
+    _ok(
+        f"TTL 对齐：spot_ttl={cfg.data.spot_ttl_seconds}s >= "
+        f"realtime_ttl={cfg.data.realtime_ttl_seconds}s"
+    )
+
+    # --- 4.2 provider 默认值本身也不能小于 manager 默认值 ---
+    bare = AkShareProvider()
+    assert bare.spot_ttl >= DataConfig().realtime_ttl_seconds, (
+        f"provider 默认 spot_ttl({bare.spot_ttl}) 小于 manager 默认 "
+        f"realtime_ttl({DataConfig().realtime_ttl_seconds})"
+    )
+    _ok(f"provider 默认 spot_ttl={bare.spot_ttl}s 不小于 manager 默认 TTL")
+
+    # --- 4.3 TTL 内重复取数应命中缓存，不再发请求 ---
+    p = AkShareProvider(timeout=5, spot_ttl=30)
+    fake = _FakeAk(list_ok=True)
+    p._ak = fake  # 注入假 akshare，避免联网
+
+    df1 = p.realtime(["600519"])
+    assert fake.spot_calls == 1, f"首次应真实取数，实际 {fake.spot_calls} 次"
+    assert len(df1) == 1 and df1.loc[0, "symbol"] == "600519", df1
+
+    for _ in range(5):
+        p.realtime(["600519", "000001"])
+    assert fake.spot_calls == 1, (
+        f"TTL 内重复取数应命中缓存，但实际又取了 {fake.spot_calls} 次"
+    )
+    _ok(f"TTL 内 6 次取数只触发 1 次真实请求（省下 5×59 = 295 个 HTTP 请求）")
+
+    # --- 4.4 TTL 过期后应重新取数 ---
+    p._spot_ts -= (p.spot_ttl + 1)
+    p.realtime(["600519"])
+    assert fake.spot_calls == 2, f"TTL 过期后应重新取数，实际 {fake.spot_calls} 次"
+    _ok("TTL 过期后正常刷新（缓存不会永久不更新）")
+    print("    Snapshot cache OK\n")
+
+
+def test_stock_list_fallback_cost() -> None:
+    """股票列表的降级路径不能比主路径更贵。
+
+    主路径 ``stock_info_a_code_name`` 是 1 次请求；一旦失败，旧实现会回退到
+    ``_spot_snapshot()``（59 次分页请求）——降级反而更贵，且主路径失败通常
+    意味着网络有问题，此时更应该快速失败而不是转头发一轮更重的请求。
+    """
+    print("[5] 股票列表降级路径开销")
+    from cnstock.data.akshare_provider import AkShareProvider
+
+    # --- 5.1 主路径可用时不碰快照 ---
+    p = AkShareProvider(timeout=5, spot_ttl=30)
+    fake = _FakeAk(list_ok=True)
+    p._ak = fake
+    df = p.stock_list()
+    assert fake.list_calls == 1 and fake.spot_calls == 0, (
+        f"主路径可用时不应触发快照：list={fake.list_calls} spot={fake.spot_calls}"
+    )
+    assert set(df["symbol"]) == {"600519", "000001"}, df
+    _ok("主路径可用：1 次请求，未触发全市场快照")
+
+    # --- 5.2 主路径失败且无缓存快照：应快速失败，绝不触发 59 次请求 ---
+    p2 = AkShareProvider(timeout=5, spot_ttl=30)
+    fake2 = _FakeAk(list_ok=False)
+    p2._ak = fake2
+    try:
+        p2.stock_list()
+    except DataError as exc:
+        assert fake2.spot_calls == 0, (
+            f"降级路径不得触发全市场快照，实际触发 {fake2.spot_calls} 次"
+            "（每次约 59 个 HTTP 请求）"
+        )
+        assert "不会为此触发全市场快照拉取" in str(exc), str(exc)
+        _ok("主路径失败：快速失败，未触发 59 次分页请求")
+    else:
+        raise AssertionError("主路径失败且无快照时应抛 DataError")
+
+    # --- 5.3 已有内存快照时可零成本复用 ---
+    p3 = AkShareProvider(timeout=5, spot_ttl=30)
+    fake3 = _FakeAk(list_ok=False)
+    p3._ak = fake3
+    p3.realtime(["600519"])                 # 先让快照进缓存
+    assert fake3.spot_calls == 1
+    df3 = p3.stock_list()                   # 再取列表，应直接复用
+    assert fake3.spot_calls == 1, (
+        f"已有快照应零成本复用，实际又拉了 {fake3.spot_calls} 次"
+    )
+    assert set(df3["symbol"]) == {"600519", "000001"}, df3
+    _ok("已有内存快照时零成本复用（1 次请求拿到代码+名称）")
+    print("    Stock list fallback OK\n")
+
+
+# ============================================================
 
 def main() -> int:
     started = time.perf_counter()
-    tests = (test_persist_roundtrip, test_trade_view_rows, test_offline_cooldown)
+    tests = (
+        test_persist_roundtrip,
+        test_trade_view_rows,
+        test_offline_cooldown,
+        test_snapshot_cache,
+        test_stock_list_fallback_cost,
+    )
     for t in tests:
         t()
     print(f"=== 全部回归测试通过：{PASSED} 项断言，耗时 {time.perf_counter()-started:.2f}s ===")

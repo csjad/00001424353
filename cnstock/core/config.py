@@ -56,7 +56,16 @@ class DataConfig:
     tushare_token: str = ""            # Tushare Pro token（可选）
     cache_enabled: bool = True
     cache_ttl_days: int = 7            # 历史数据缓存有效期
-    realtime_ttl_seconds: int = 15     # 实时快照缓存有效期
+    realtime_ttl_seconds: int = 15     # 实时快照缓存有效期（manager 层）
+    #: 全市场快照缓存有效期（provider 层）。
+    #:
+    #: **必须 >= ``realtime_ttl_seconds``**，否则 provider 层缓存会先于
+    #: manager 层过期，导致每次刷新都穿透到真实网络请求——而
+    #: ``stock_zh_a_spot_em`` 是约 5900 只票按每页 100 条分页的接口，
+    #: 一次就是 59 个 HTTP 请求。此前该值硬编码为 10（< 15），缓存形同虚设。
+    #:
+    #: 调大 = 请求更少但数据更旧；调小 = 数据更新但请求更多。
+    spot_ttl_seconds: int = 30         # 全市场快照缓存有效期（provider 层）
     request_timeout: int = 20
 
 
