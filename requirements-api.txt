@@ -1,0 +1,6 @@
+# REST API 服务依赖（Qt-free，套在纯逻辑层之上）
+# 服务端镜像只需装这份 + requirements-core.txt，无需 PyQt6 / pyqtgraph
+-r requirements-core.txt
+fastapi>=0.110
+uvicorn>=0.27
+httpx>=0.27

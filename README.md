@@ -178,17 +178,19 @@ cn-stock-desktop/
 
 ## 架构分层（前后端边界）
 
-本项目是**桌面单体应用**，所有代码跑在**同一个进程内**——没有独立服务器、没有 REST API、没有数据库服务。但业务职责严格分层，**纯逻辑层完全不依赖 GUI**：
+本项目桌面端是**单体应用**，所有代码跑在**同一个进程内**。但业务职责严格分层，**纯逻辑层完全不依赖 GUI**；并额外提供了可选的服务端入口 `cnstock/api`（FastAPI），把同一套逻辑层暴露成 REST API，作为桌面 UI 之外的另一个消费者：
 
 | 层 | 目录 | 代码量 | 依赖 |
 |---|---|---|---|
 | 前端 UI | `cnstock/ui` | 1,873 行 | PyQt6 / pyqtgraph |
 | **后端逻辑** | `cnstock/core` + `data` + `engine` + `backtest` + `storage` | **3,763 行（67%）** | 仅 stdlib + numpy / pandas |
+| API 服务 | `cnstock/api` | ~505 行（新增） | FastAPI（Qt-free） |
 
-后端五层（`core`/`data`/`engine`/`backtest`/`storage`）**零 PyQt 引用**，可独立运行、可被 FastAPI 等框架包裹成服务端。边界由 `scripts/_verify.py` 的 **[8] 后端边界守卫** 双防线锁定：
+后端五层（`core`/`data`/`engine`/`backtest`/`storage`）与 API 服务层（`api`）**零 PyQt 引用**，可独立运行、可被 FastAPI 等框架包裹成服务端。边界由 `scripts/_verify.py` 的 **[8] 后端边界守卫** + **[9] API 层无头冒烟** 锁定：
 
-- **静态**：源码扫描，任何 PyQt6 / pyqtgraph 字样立即报错；
-- **动态**：子进程跑 `scripts/headless_demo.py`（自带 Qt 导入阻断器），仍须完整跑通撮合 + 6 策略回测 + 持久化 + 指标。
+- **静态**：源码扫描 import 语句，任何 PyQt6 / pyqtgraph 导入立即报错；
+- **动态**：子进程跑 `scripts/headless_demo.py`（自带 Qt 导入阻断器），仍须完整跑通撮合 + 6 策略回测 + 持久化 + 指标；
+- **API 实测**：子进程装 Qt 阻断器后 import `cnstock.api.app`，用 TestClient 把 health / strategies / backtest / account / order / price-limit 全部打一遍。
 
 ### 无头运行验证
 
@@ -198,13 +200,47 @@ python scripts/headless_demo.py     # 退出 0 = 纯逻辑层零 GUI 依赖
 
 该脚本在 import 任何业务模块**之前**就往 `sys.meta_path` 装阻断器，凡是要 import `PyQt6.*` / `pyqtgraph.*` 一律抛 `ImportError`；在这种"没有 Qt"的环境里跑完真实撮合（T+1 / 涨跌停 / 整百 / 资金校验）、6 策略回测、SQLite 持久化、绩效指标。
 
-### 服务化演进路径
+### REST API 服务（已实现）
 
-若将来需要多设备同步 / 云端账户 / 真实券商对接 / 对外 API，只需：
+纯逻辑层已套一层 FastAPI（`cnstock/api`），可作为独立服务端运行——**零 Qt 依赖**，
+服务端镜像只需 `requirements-api.txt` 即可，无需安装 PyQt6 / pyqtgraph。
 
-1. `pip install -r requirements-core.txt`（不装 PyQt6，服务端环境可省 ~100MB+ GUI 依赖）；
-2. 把 `cnstock/engine` + `backtest` + `data` 包一层 FastAPI，暴露下单 / 回测 / 行情接口；
-3. 桌面 UI 降级为该服务端的一个消费者（而非宿主）。
+启动：
+
+```bash
+pip install -r requirements-api.txt
+python -m cnstock.api                 # 默认 :8000，交互式文档见 http://localhost:8000/docs
+# 或：CNSTOCK_API_PORT=9000 python scripts/serve.py
+```
+
+状态库默认当前目录 `server_state.db`，可用环境变量 `CNSTOCK_API_DB` 覆盖（避免与桌面端 `data.db` 冲突）。
+
+主要接口（前缀 `/api`）：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET  | `/api/health` | 健康检查 |
+| GET  | `/api/strategies` | 策略目录（含参数规范） |
+| POST | `/api/backtest` | 单策略回测（上传 OHLCV） |
+| POST | `/api/backtest/all` | 全部策略批量回测 |
+| GET  | `/api/account` | 账户快照 |
+| GET  | `/api/positions` | 持仓列表 |
+| POST | `/api/orders` | 提交委托（离线需带 `quote`） |
+| GET  | `/api/orders` / `/api/trades` | 委托 / 成交列表 |
+| POST | `/api/orders/{id}/cancel` | 撤单 |
+| POST | `/api/settlement` | 日终结算（T+1 解锁） |
+| POST | `/api/account/reset` | 重置账户 |
+| GET  | `/api/price-limit` | 涨跌停计算工具 |
+| POST | `/api/metrics` | 绩效指标计算 |
+
+> 离线环境下下单必须随请求携带 `quote: {price, prev_close, name?}`，否则以「未获取到行情」拒单。
+
+无头验证（含 API 层）：
+
+```bash
+python scripts/_verify.py      # [8] 后端边界守卫 + [9] API 层无头冒烟，共 31 项断言
+python scripts/api_smoke.py     # 单独跑 API 层无头冒烟（自带 Qt 阻断器）
+```
 
 逻辑层无需改动即可复用——这正是分层的目的。
 
@@ -212,6 +248,7 @@ python scripts/headless_demo.py     # 退出 0 = 纯逻辑层零 GUI 依赖
 
 - `requirements.txt`：完整依赖（含 GUI）
 - `requirements-core.txt`：纯逻辑层依赖（无 Qt），服务端 / CI / headless 专用
+- `requirements-api.txt`：`-r requirements-core.txt` + FastAPI / Uvicorn / HTTPX，服务端镜像专用
 
 ---
 

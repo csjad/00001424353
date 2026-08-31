@@ -675,19 +675,27 @@ def test_no_qt_in_core_layers() -> None:
     """
     print("[8] 后端边界守卫：纯逻辑层零 GUI 依赖 ...")
 
-    # 8.1 静态扫描
+    # 8.1 静态扫描：只匹配真实的 import / from ... import 语句（按行首），
+    # 避免把文档字符串/注释里提到的 PyQt6 / pyqtgraph 字样误判为违规。
     qt_markers = ("PyQt6", "pyqtgraph")
+    import re
+
+    _import_re = re.compile(r"^\s*(?:from\s+(\S+)\s+import|import\s+(\S+))")
     clean = True
-    for layer in ("core", "data", "engine", "backtest", "storage"):
+    for layer in ("core", "data", "engine", "backtest", "storage", "api"):
         layer_dir = ROOT / "cnstock" / layer
         for f in sorted(layer_dir.rglob("*.py")):
             src = f.read_text(encoding="utf-8")
-            for mk in qt_markers:
-                if mk in src:
-                    print(f"    [违规] {f.relative_to(ROOT)} 含 {mk}")
+            for line in src.splitlines():
+                m = _import_re.match(line)
+                if not m:
+                    continue
+                mod = (m.group(1) or m.group(2)).split(".")[0]
+                if mod in qt_markers:
+                    print(f"    [违规] {f.relative_to(ROOT)}: {line.strip()}")
                     clean = False
-    assert clean, "纯逻辑层不得 import PyQt6 / pyqtgraph"
-    _ok("静态扫描：core/data/engine/backtest/storage 零 PyQt 引用")
+    assert clean, "纯逻辑层（含 api 服务层）不得 import PyQt6 / pyqtgraph"
+    _ok("静态扫描：core/data/engine/backtest/storage/api 零 PyQt 导入语句")
 
     # 8.2 动态无头证明：子进程跑 headless_demo.py（内部阻断 Qt 导入）
     demo = ROOT / "scripts" / "headless_demo.py"
@@ -722,6 +730,7 @@ def test_no_qt_in_core_layers() -> None:
                 return None
         sys.meta_path.insert(0, _B())
         import cnstock.engine.broker  # 应成功（broker 不引 Qt）
+        import cnstock.api.app         # 应成功（API 服务层也不引 Qt）
         try:
             import cnstock.fake_qt_gate  # 不存在的模块，跳过
         except Exception:
@@ -744,6 +753,44 @@ def test_no_qt_in_core_layers() -> None:
 
 
 # ============================================================
+# [9] API 层无头冒烟（FastAPI）：零 GUI 依赖 + 核心接口可用
+# ============================================================
+
+def test_api_layer() -> None:
+    """cnstock.api 必须零 GUI 依赖，且核心 HTTP 接口可用。
+
+    与 [8] 同一思路，但针对「套了 FastAPI 的服务端」：子进程里装 Qt 阻断器后
+    import ``cnstock.api.app``，并用 TestClient 把 health / strategies / backtest /
+    backtest-all / account / order / price-limit 全部打一遍。fastapi 未安装时跳过。
+    """
+    print("[9] API 层无头冒烟（FastAPI）...")
+
+    smoke = ROOT / "scripts" / "api_smoke.py"
+    assert smoke.exists(), smoke
+    proc = subprocess.run(
+        [sys.executable, str(smoke)],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    out = (proc.stdout or "") + (proc.stderr or "")
+
+    if proc.returncode == 2:
+        # api_smoke 在 fastapi 缺失时主动退出 2：提示安装后跳过，不阻塞整套回归
+        _ok("fastapi 未安装，跳过（运行 `pip install -r requirements-api.txt` 后重测）")
+        print("    API 层 OK（跳过）\n")
+        return
+
+    assert proc.returncode == 0, (
+        f"api_smoke.py 退出码 {proc.returncode}\n{out[-2500:]}"
+    )
+    assert "API 无头冒烟通过" in out, f"未打印通过标志：\n{out[-1500:]}"
+    _ok("API 层零 Qt 依赖：health/strategies/backtest/backtest-all/account/order/price-limit 全部 200")
+    print("    API 层 OK\n")
+
+
+# ============================================================
 
 def main() -> int:
     started = time.perf_counter()
@@ -756,6 +803,7 @@ def main() -> int:
         test_realtime_per_symbol,
         test_market_view_load,
         test_no_qt_in_core_layers,
+        test_api_layer,
     )
     for t in tests:
         t()
