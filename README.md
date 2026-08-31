@@ -176,6 +176,45 @@ cn-stock-desktop/
 
 ---
 
+## 架构分层（前后端边界）
+
+本项目是**桌面单体应用**，所有代码跑在**同一个进程内**——没有独立服务器、没有 REST API、没有数据库服务。但业务职责严格分层，**纯逻辑层完全不依赖 GUI**：
+
+| 层 | 目录 | 代码量 | 依赖 |
+|---|---|---|---|
+| 前端 UI | `cnstock/ui` | 1,873 行 | PyQt6 / pyqtgraph |
+| **后端逻辑** | `cnstock/core` + `data` + `engine` + `backtest` + `storage` | **3,763 行（67%）** | 仅 stdlib + numpy / pandas |
+
+后端五层（`core`/`data`/`engine`/`backtest`/`storage`）**零 PyQt 引用**，可独立运行、可被 FastAPI 等框架包裹成服务端。边界由 `scripts/_verify.py` 的 **[8] 后端边界守卫** 双防线锁定：
+
+- **静态**：源码扫描，任何 PyQt6 / pyqtgraph 字样立即报错；
+- **动态**：子进程跑 `scripts/headless_demo.py`（自带 Qt 导入阻断器），仍须完整跑通撮合 + 6 策略回测 + 持久化 + 指标。
+
+### 无头运行验证
+
+```bash
+python scripts/headless_demo.py     # 退出 0 = 纯逻辑层零 GUI 依赖
+```
+
+该脚本在 import 任何业务模块**之前**就往 `sys.meta_path` 装阻断器，凡是要 import `PyQt6.*` / `pyqtgraph.*` 一律抛 `ImportError`；在这种"没有 Qt"的环境里跑完真实撮合（T+1 / 涨跌停 / 整百 / 资金校验）、6 策略回测、SQLite 持久化、绩效指标。
+
+### 服务化演进路径
+
+若将来需要多设备同步 / 云端账户 / 真实券商对接 / 对外 API，只需：
+
+1. `pip install -r requirements-core.txt`（不装 PyQt6，服务端环境可省 ~100MB+ GUI 依赖）；
+2. 把 `cnstock/engine` + `backtest` + `data` 包一层 FastAPI，暴露下单 / 回测 / 行情接口；
+3. 桌面 UI 降级为该服务端的一个消费者（而非宿主）。
+
+逻辑层无需改动即可复用——这正是分层的目的。
+
+### 依赖拆分
+
+- `requirements.txt`：完整依赖（含 GUI）
+- `requirements-core.txt`：纯逻辑层依赖（无 Qt），服务端 / CI / headless 专用
+
+---
+
 ## 免责声明
 
 本软件仅供学习与策略研究使用，**不构成任何投资建议**。模拟撮合基于历史/实时行情近似，

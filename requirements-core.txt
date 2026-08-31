@@ -1,0 +1,24 @@
+# cn-stock-desktop 纯逻辑层依赖（无 GUI）
+#
+# 用途：服务端 / CI / 回测节点 / headless 环境安装这个即可，
+#       无需安装 PyQt6 / pyqtgraph（前者在 Windows-only 路径下还装不上）。
+#       core / data / engine / backtest / storage 五层只依赖下列包。
+#
+# 安装：pip install -r requirements-core.txt
+# Python >= 3.10（本项目在 3.13.14 上验证）
+
+# ---------- 数值/数据 ----------
+numpy>=1.26.0
+pandas>=2.2.0
+
+# ---------- 行情数据源（主/备） ----------
+akshare>=1.14.0
+tushare>=1.4.21
+
+# ---------- akshare 关键传递依赖（显式声明，避免缺漏） ----------
+requests>=2.32.0
+beautifulsoup4>=4.12.0
+lxml>=5.2.0
+openpyxl>=3.1.0
+xlrd>=2.0.1
+tqdm>=4.66.0

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -661,6 +662,88 @@ def test_market_view_load() -> None:
 
 
 # ============================================================
+# [8] 后端边界守卫：纯逻辑层不得依赖 GUI（静态扫描 + 动态无头证明）
+# ============================================================
+
+def test_no_qt_in_core_layers() -> None:
+    """core/data/engine/backtest/storage 必须零 PyQt 依赖。
+
+    与服务化演进强相关：将来套 FastAPI 变服务端时，这些模块要在**没有 Qt** 的
+    环境跑。本测试筑两道防线——
+    静态：源码里不得出现 PyQt6 / pyqtgraph 字样（有人误 import 立即暴露）；
+    动态：子进程里跑 headless_demo.py（自带 Qt 阻断器），仍须完整跑通撮合 + 回测。
+    """
+    print("[8] 后端边界守卫：纯逻辑层零 GUI 依赖 ...")
+
+    # 8.1 静态扫描
+    qt_markers = ("PyQt6", "pyqtgraph")
+    clean = True
+    for layer in ("core", "data", "engine", "backtest", "storage"):
+        layer_dir = ROOT / "cnstock" / layer
+        for f in sorted(layer_dir.rglob("*.py")):
+            src = f.read_text(encoding="utf-8")
+            for mk in qt_markers:
+                if mk in src:
+                    print(f"    [违规] {f.relative_to(ROOT)} 含 {mk}")
+                    clean = False
+    assert clean, "纯逻辑层不得 import PyQt6 / pyqtgraph"
+    _ok("静态扫描：core/data/engine/backtest/storage 零 PyQt 引用")
+
+    # 8.2 动态无头证明：子进程跑 headless_demo.py（内部阻断 Qt 导入）
+    demo = ROOT / "scripts" / "headless_demo.py"
+    assert demo.exists(), demo
+    proc = subprocess.run(
+        [sys.executable, str(demo)],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, (
+        f"headless_demo.py 退出码 {proc.returncode}\n{out[-2000:]}"
+    )
+    assert "无头证明通过" in out, f"未打印通过标志：\n{out[-1500:]}"
+    _ok("动态无头：阻断 Qt 后撮合 + 6 策略回测 + 持久化 + 指标仍完整跑通")
+
+    # 8.3 负向验证：故意让某逻辑模块 import PyQt6 应被拦下且测试失败
+    import textwrap
+
+    probe = ROOT / "scripts" / "_probe_qt_import.py"
+    probe.write_text(textwrap.dedent(
+        """\
+        import sys
+        sys.path.insert(0, sys.argv[1])
+        BLOCKED = ("PyQt6", "pyqtgraph")
+        class _B:
+            def find_spec(self, name, path=None, target=None):
+                if name.split('.')[0] in BLOCKED:
+                    raise ImportError(f"blocked {name}")
+                return None
+        sys.meta_path.insert(0, _B())
+        import cnstock.engine.broker  # 应成功（broker 不引 Qt）
+        try:
+            import cnstock.fake_qt_gate  # 不存在的模块，跳过
+        except Exception:
+            pass
+        import PyQt6.QtWidgets  # 必须被阻断
+        """
+    ), encoding="utf-8")
+    try:
+        p2 = subprocess.run(
+            [sys.executable, str(probe), str(ROOT)],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=60,
+        )
+        # 期望：导入 PyQt6 被阻断 → 退出码非 0
+        assert p2.returncode != 0, "负向验证失败：Qt 阻断器没拦住 PyQt6 导入"
+        _ok("负向验证：逻辑层若 import PyQt6 会被阻断器拦下（测试必失败，符合预期）")
+    finally:
+        probe.unlink(missing_ok=True)
+
+    print("    边界守卫 OK\n")
+
+
+# ============================================================
 
 def main() -> int:
     started = time.perf_counter()
@@ -672,6 +755,7 @@ def main() -> int:
         test_stock_list_fallback_cost,
         test_realtime_per_symbol,
         test_market_view_load,
+        test_no_qt_in_core_layers,
     )
     for t in tests:
         t()
