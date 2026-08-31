@@ -38,6 +38,32 @@
 
 ---
 
+## 配置说明（可选）
+
+配置文件位于 `%APPDATA%\cn-stock-desktop\config.json`，首次启动自动生成，修改保存即生效（部分项支持运行时热更新，无需重启）。
+
+`data` 相关核心配置项：
+
+| 配置项 | 默认 | 说明 |
+|------|------|------|
+| `primary` / `fallback` | `akshare` / `tushare` | 主/备数据源，主失败自动降级 |
+| `tushare_token` | 空 | 备源 token（可选，留空则 Tushare 不可用） |
+| `cache_enabled` / `cache_ttl_days` | `true` / `7` | 历史数据 SQLite 缓存（天） |
+| `realtime_ttl_seconds` | `15` | manager 层实时行情内存缓存有效期（秒） |
+| `spot_ttl_seconds` | `30` | provider 层全市场快照缓存有效期（秒），**必须 ≥ `realtime_ttl_seconds`**，否则缓存穿透、每次刷新都重拉约 59 个分页请求 |
+| `request_timeout` | `20` | 单次行情请求超时（秒）；超时后进入失败冷却，不再傻等一个完整连接 |
+| `realtime_per_symbol` | `false` | **实验性**单票实时快路径（见下） |
+
+### 实验性：`realtime_per_symbol`（默认关闭）
+
+默认关闭。开启后，实时行情对自选股（通常个位数）**逐只**调用东财 `stock_bid_ask_em`（每只 1 个 HTTP 请求），不再拉全市场快照（一次约 59 个分页请求）——请求量随自选股数量线性增长，与全市场总票数无关。
+
+- **安全回退**：任意异常或空返回都会自动回退到全市场快照，因此开启它**绝不会比现状更差**；
+- **需联网验证**：该接口返回长表（item/value），字段映射在离线环境无法端到端确认，故默认关闭。联网后如想降低延迟，可手动设为 `true` 并观察日志确认报价正确后再长期使用；
+- 未实现该接口的备源（如 Tushare）会自动退回全市场快照，不受影响。
+
+---
+
 ## 安装与运行（开发模式）
 
 需要 Python ≥ 3.10（已在 3.13.14 验证）。
@@ -85,7 +111,7 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-> 本地已有的 `dist/A股模拟交易终端.exe`（≈124MB）可直接手动上传到 Release，无需等待 CI。
+> 本地已有的 `dist/A股模拟交易终端.exe`（≈72MB）可直接手动上传到 Release，无需等待 CI。
 
 ---
 
@@ -114,7 +140,9 @@ cn-stock-desktop/
 │   └── main.py        # 应用主入口（setup logging + QApp + MainWindow）
 ├── scripts/
 │   ├── cli_demo.py    # 命令行回测（无需 GUI）
-│   └── make_screenshots.py  # README 截图生成（离屏、零联网）
+│   ├── make_screenshots.py  # README 截图生成（离屏、零联网）
+│   ├── _smoke.py      # 冒烟测试：撮合/回测/绩效（离线可跑）
+│   └── _verify.py     # 回归测试：持久化/视图渲染/缓存/降级/单票快路径（离线可跑）
 ├── docs/
 │   └── screenshots/   # README 截图（00-overview / 01-market / 02-trade / 03-backtest）
 ├── launcher.py        # PyInstaller 冻结入口（修复包内相对导入）
