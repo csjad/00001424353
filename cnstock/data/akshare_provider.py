@@ -9,6 +9,7 @@ akshare 为重量级依赖，采用**延迟导入**以避免拖慢应用启动�
 """
 from __future__ import annotations
 
+import logging
 import time
 from typing import Iterable
 
@@ -18,10 +19,13 @@ from .base import (
     ADJUST_QFQ,
     DataError,
     DataProvider,
+    REALTIME_COLUMNS,
     normalize_daily,
     normalize_realtime,
     run_with_timeout,
 )
+
+logger = logging.getLogger(__name__)
 
 #: akshare 日线原始列名 -> 统一 schema
 _DAILY_MAP = {
@@ -52,6 +56,22 @@ _MINUTE_MAP = {
 _SPOT_MAP = {
     "代码": "symbol",
     "名称": "name",
+    "最新价": "price",
+    "今开": "open",
+    "最高": "high",
+    "最低": "low",
+    "昨收": "prev_close",
+    "涨跌额": "change",
+    "涨跌幅": "pct_chg",
+    "成交量": "volume",
+    "成交额": "amount",
+    "换手率": "turnover",
+}
+
+#: akshare 东财单票实时（stock_bid_ask_em）长表的 item -> 统一 schema。
+#: 该接口以 item/value 两列返回一只票的全量盘口与实时字段，逐只调用只发
+#: 1 个 HTTP 请求，远轻于全市场快照（一次约 59 个分页请求）。
+_BID_ASK_MAP = {
     "最新价": "price",
     "今开": "open",
     "最高": "high",
@@ -173,6 +193,66 @@ class AkShareProvider(DataProvider):
         if got.empty:
             raise DataError(f"[akshare] 未匹配到实时行情：{sorted(wanted)}")
         return got.reset_index(drop=True)
+
+    def realtime_per_symbol(self, symbols: Iterable[str]) -> pd.DataFrame:
+        """单票实时快路径（默认关闭，由 manager 按配置决定是否调用）。
+
+        逐只调用东财 ``stock_bid_ask_em``（每只 1 个 HTTP 请求），避免拉全市场
+        快照（``stock_zh_a_spot_em`` 一次约 59 个分页请求）。仅对少量自选股有意义。
+
+        **安全保证**：任意异常或空返回，一律回退到 ``realtime()``（全市场快照），
+        因此开启它绝不会比现状更差——最坏情况就是退回到今天的默认行为。
+        名称优先从股票列表缓存（``_list_df``）取，长表里的「名称」字段兜底。
+        """
+        wanted = [str(s).strip()[-6:] for s in symbols if s]
+        if not wanted:
+            return pd.DataFrame(columns=REALTIME_COLUMNS)
+
+        rows: list[dict] = []
+        for sym in wanted:
+            try:
+                raw = run_with_timeout(
+                    self.ak.stock_bid_ask_em, self.timeout, symbol=sym
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[akshare] 单票 %s 实时失败，回退全市场快照：%s", sym, exc
+                )
+                return self.realtime(wanted)
+            if raw is None or raw.empty:
+                return self.realtime(wanted)
+            row = self._bid_ask_row(raw, sym)
+            if row is None:
+                return self.realtime(wanted)
+            rows.append(row)
+
+        if not rows:
+            return self.realtime(wanted)
+        return normalize_realtime(pd.DataFrame(rows))
+
+    def _bid_ask_row(self, raw: pd.DataFrame, sym: str) -> "dict | None":
+        """把 ``stock_bid_ask_em`` 的 item/value 长表解析成一行统一 schema。
+
+        返回 ``None`` 表示长表形态不可识别，调用方应据此回退到全市场快照。
+        """
+        if raw is None or "item" not in raw.columns or "value" not in raw.columns:
+            return None
+
+        kv = dict(zip(raw["item"].astype(str), raw["value"]))
+        row: dict = {"symbol": sym}
+        for cn, en in _BID_ASK_MAP.items():
+            row[en] = kv.get(cn)
+
+        # 名称优先用股票列表缓存（更可靠，启动时已拉过）；长表也有「名称」字段时兜底
+        name = None
+        if self._list_df is not None and not self._list_df.empty:
+            hit = self._list_df[self._list_df["symbol"] == sym]
+            if not hit.empty:
+                name = hit.iloc[0]["name"]
+        if name is None:
+            name = kv.get("名称")
+        row["name"] = name
+        return row
 
     def _spot_snapshot(self) -> pd.DataFrame:
         """拉取全市场快照（带短时缓存，避免高频请求被限）。"""

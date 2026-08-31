@@ -29,7 +29,7 @@ sys.path.insert(0, str(ROOT))
 from cnstock.core.config import load_config
 from cnstock.core.constants import OrderSide, OrderType
 from cnstock.core.models import Order, OrderStatus
-from cnstock.data.base import DataError
+from cnstock.data.base import DataError, DataProvider
 from cnstock.data.manager import DataManager
 from cnstock.engine.broker import SimBroker
 from cnstock.storage.db import SqliteStorage
@@ -290,18 +290,46 @@ def _fake_spot_frame() -> "pd.DataFrame":
     )
 
 
+def _fake_bid_ask_frame(sym: str) -> "pd.DataFrame":
+    """构造一份符合 akshare stock_bid_ask_em 输出形态的长表（item/value）。"""
+    import pandas as pd
+
+    rows = [
+        ("名称", "贵州茅台"),
+        ("代码", sym),
+        ("最新价", 1680.0),
+        ("涨跌额", 30.0),
+        ("涨跌幅", 1.82),
+        ("今开", 1660.0),
+        ("最高", 1690.0),
+        ("最低", 1655.0),
+        ("昨收", 1650.0),
+        ("成交量", 12345.0),
+        ("成交额", 2.07e8),
+        ("换手率", 0.98),
+        ("时间", "2026-08-31 15:00:00"),
+    ]
+    return pd.DataFrame(rows, columns=["item", "value"])
+
+
 class _FakeAk:
     """只暴露被测代码会用到的两个接口，并统计各自被调用次数。"""
 
     def __init__(self, list_ok: bool = True) -> None:
         self.spot_calls = 0
         self.list_calls = 0
+        self.bidask_calls = 0
         self._list_ok = list_ok
 
     def stock_zh_a_spot_em(self) -> "pd.DataFrame":
         # 全市场快照：约 5900 只票按 pz=100 分页，一次就是 59 个 HTTP 请求。
         self.spot_calls += 1
         return _fake_spot_frame()
+
+    def stock_bid_ask_em(self, symbol: str) -> "pd.DataFrame":
+        # 单票实时：东财 push2 接口的 item/value 长表，每只 1 个请求。
+        self.bidask_calls += 1
+        return _fake_bid_ask_frame(symbol)
 
     def stock_info_a_code_name(self) -> "pd.DataFrame":
         import pandas as pd
@@ -311,6 +339,46 @@ class _FakeAk:
             raise RuntimeError("模拟：stock_info_a_code_name 不可用")
         return pd.DataFrame([{"code": "600519", "name": "贵州茅台"},
                              {"code": "000001", "name": "平安银行"}])
+
+
+class _FakeAkBidAskFail(_FakeAk):
+    """单票接口必失败，用于验证回退到全市场快照。"""
+
+    def stock_bid_ask_em(self, symbol: str) -> "pd.DataFrame":
+        raise RuntimeError("模拟：stock_bid_ask_em 不可用")
+
+
+class _StubProvider(DataProvider):
+    """仅记录 manager 走了哪条实时路径（用于验证开关生效）。"""
+
+    name = "stub"
+    support_minute = False
+
+    def __init__(self) -> None:
+        self.realtime_calls = 0
+        self.per_symbol_calls = 0
+
+    def daily(self, *a, **k) -> "pd.DataFrame":
+        import pandas as pd
+
+        return pd.DataFrame()
+
+    def realtime(self, symbols) -> "pd.DataFrame":
+        self.realtime_calls += 1
+        import pandas as pd
+
+        return pd.DataFrame([{"symbol": s} for s in symbols])
+
+    def realtime_per_symbol(self, symbols) -> "pd.DataFrame":
+        self.per_symbol_calls += 1
+        import pandas as pd
+
+        return pd.DataFrame([{"symbol": s} for s in symbols])
+
+    def stock_list(self) -> "pd.DataFrame":
+        import pandas as pd
+
+        return pd.DataFrame([{"symbol": "600519", "name": "X"}])
 
 
 def test_snapshot_cache() -> None:
@@ -423,6 +491,90 @@ def test_stock_list_fallback_cost() -> None:
 
 
 # ============================================================
+# [6] 单票实时快路径（默认关闭，安全可回退）
+# ============================================================
+
+def test_realtime_per_symbol() -> None:
+    """单票快路径：字段解析正确、名称取自缓存、任意异常回退快照、开关控制走哪条路径。
+
+    该路径**默认关闭**，离线无法验证真实字段映射，故做成 Opt-in，且内部任何
+    失败都回退到全市场快照——本测试用 mock 验证解析与回退逻辑，并确认默认关闭
+    时 manager 不会意外走这条路径（即不改动现网行为）。
+    """
+    print("[6] 单票实时快路径（默认关闭）")
+    import pandas as pd
+
+    from cnstock.core.config import AppConfig, DataConfig
+    from cnstock.data.akshare_provider import AkShareProvider
+
+    # --- 6.1 配置默认关闭 ---
+    cfg = load_config()
+    assert cfg.data.realtime_per_symbol is False, "realtime_per_symbol 默认应为 False"
+    _ok("配置默认关闭（realtime_per_symbol=False），不改动现网行为")
+
+    # --- 6.2 单票字段解析正确，名称取自股票列表缓存 ---
+    p = AkShareProvider(timeout=5, spot_ttl=30)
+    fake = _FakeAk()
+    p._ak = fake
+    p._list_df = pd.DataFrame([{"symbol": "600519", "name": "贵州茅台"},
+                               {"symbol": "000001", "name": "平安银行"}])
+    df = p.realtime_per_symbol(["600519"])
+    assert fake.bidask_calls == 1, f"应只发 1 个单票请求，实际 {fake.bidask_calls}"
+    assert len(df) == 1 and df.loc[0, "symbol"] == "600519", df
+    assert df.loc[0, "name"] == "贵州茅台", f"名称应取自列表缓存，实际 {df.loc[0, 'name']}"
+    assert abs(float(df.loc[0, "price"]) - 1680.0) < 1e-6, df.loc[0, "price"]
+    assert abs(float(df.loc[0, "pct_chg"]) - 1.82) < 1e-6, df.loc[0, "pct_chg"]
+    _ok("单票解析：price=1680.0 pct_chg=1.82% 名称=贵州茅台（1 请求 vs 快照 59 请求）")
+
+    # --- 6.3 多票各 1 请求 ---
+    p2 = AkShareProvider(timeout=5, spot_ttl=30)
+    fake2 = _FakeAk()
+    p2._ak = fake2
+    p2._list_df = pd.DataFrame([{"symbol": "600519", "name": "贵州茅台"},
+                                {"symbol": "000001", "name": "平安银行"}])
+    df2 = p2.realtime_per_symbol(["600519", "000001"])
+    assert fake2.bidask_calls == 2, f"2 只票应 2 个请求，实际 {fake2.bidask_calls}"
+    assert set(df2["symbol"]) == {"600519", "000001"}, df2
+    _ok("多票：每只 1 请求，共 2 请求")
+
+    # --- 6.4 单票接口异常 -> 自动回退全市场快照，结果仍正确、不报错 ---
+    p3 = AkShareProvider(timeout=5, spot_ttl=30)
+    fake3 = _FakeAkBidAskFail()
+    p3._ak = fake3
+    df3 = p3.realtime_per_symbol(["600519"])  # 回退到 realtime() -> _spot_snapshot
+    assert fake3.spot_calls == 1, f"回退应触发 1 次快照，实际 {fake3.spot_calls}"
+    assert len(df3) == 1 and df3.loc[0, "symbol"] == "600519", df3
+    assert abs(float(df3.loc[0, "price"]) - 1680.0) < 1e-6, df3
+    _ok("单票异常自动回退全市场快照：结果仍正确，不报错（绝不会更差）")
+
+    # --- 6.5 manager 开关真正控制走哪条路径 ---
+    cfg_on = AppConfig()
+    cfg_on.data = DataConfig(realtime_per_symbol=True)
+    dm_on = DataManager(cfg_on)
+    stub_on = _StubProvider()
+    dm_on.providers["akshare"] = stub_on
+    dm_on.primary = stub_on
+    dm_on.realtime(["600519"])
+    assert stub_on.per_symbol_calls == 1 and stub_on.realtime_calls == 0, (
+        stub_on.per_symbol_calls, stub_on.realtime_calls
+    )
+    _ok("开关=True：manager 走单票快路径（realtime_per_symbol）")
+
+    cfg_off = AppConfig()
+    cfg_off.data = DataConfig(realtime_per_symbol=False)
+    dm_off = DataManager(cfg_off)
+    stub_off = _StubProvider()
+    dm_off.providers["akshare"] = stub_off
+    dm_off.primary = stub_off
+    dm_off.realtime(["600519"])
+    assert stub_off.realtime_calls == 1 and stub_off.per_symbol_calls == 0, (
+        stub_off.realtime_calls, stub_off.per_symbol_calls
+    )
+    _ok("开关=False：manager 走全市场快照（与现状一致）")
+    print("    Per-symbol realtime OK\n")
+
+
+# ============================================================
 
 def main() -> int:
     started = time.perf_counter()
@@ -432,6 +584,7 @@ def main() -> int:
         test_offline_cooldown,
         test_snapshot_cache,
         test_stock_list_fallback_cost,
+        test_realtime_per_symbol,
     )
     for t in tests:
         t()

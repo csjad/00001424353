@@ -228,7 +228,14 @@ class DataManager:
             if provider is None or not provider.is_available():
                 continue
             try:
-                df = provider.realtime(wanted)
+                # 单票快路径（默认关闭）：provider 未实现 realtime_per_symbol
+                # 时（如 Tushare）自动退回全市场快照，绝不破坏现有行为。
+                if self.cfg.data.realtime_per_symbol and getattr(
+                    provider, "realtime_per_symbol", None
+                ):
+                    df = provider.realtime_per_symbol(wanted)
+                else:
+                    df = provider.realtime(wanted)
                 if df is not None and not df.empty:
                     self._merge_rt_cache(df)
                     return df.reset_index(drop=True)
