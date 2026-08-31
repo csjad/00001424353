@@ -60,6 +60,7 @@ class MarketView(QWidget):
         self.current_df = None
         self._worker: Worker | None = None
         self._rt_worker: Worker | None = None
+        self._load_token: int = 0          # 请求序号，用于丢弃过期（stale）结果
         self._init_ui()
         self._load_watchlist()
 
@@ -188,13 +189,15 @@ class MarketView(QWidget):
         if not symbol:
             return
         self.current_symbol = symbol
+        self._load_token += 1
+        token = self._load_token
         self.title_label.setText(f"加载 {symbol} ...")
         period = self._period_value()
         adjust = self._adjust_value()
 
         self._worker = Worker(self._fetch, symbol, period, adjust)
-        self._worker.finished.connect(lambda df: self._on_data(symbol, df))
-        self._worker.error.connect(self._on_error)
+        self._worker.finished.connect(lambda df, t=token: self._on_data(t, symbol, df))
+        self._worker.error.connect(lambda msg, t=token: self._on_error(t, symbol, msg))
         self._worker.start()
 
     def _fetch(self, symbol: str, period: str, adjust: str) -> Any:
@@ -203,25 +206,39 @@ class MarketView(QWidget):
         start = (datetime.now() - timedelta(days=1100)).strftime("%Y%m%d")
         return self.dm.daily(symbol, start=start, adjust=adjust, period=period)
 
-    def _on_data(self, symbol: str, df: Any) -> None:
+    def _on_data(self, token: int, symbol: str, df: Any) -> None:
+        # 过期请求：用户已切到别的标的，旧结果若写回会令盘口/图表串味，
+        # 快速切换自选股时尤其明显（看起来像“另一只打不开”）。必须丢弃。
+        if token != self._load_token:
+            return
         if df is None or df.empty:
             self.title_label.setText(f"{symbol} 无数据")
             return
+        # 成功路径才记录当前标的：stale 路径（上面已 return）不会改写，
+        # 旧 Worker 结束后不会再令 current_symbol / 图表串味。
+        self.current_symbol = symbol
         self.current_df = df
         ma = (5, 10, 20, 60) if self._period_value() == "daily" else (5, 10, 20)
-        self.chart.set_data(df, ma_list=ma)
-        self._update_quote_from_df(df)
+        try:
+            self.chart.set_data(df, ma_list=ma)
+            self._update_quote_from_df(df)
+        except Exception as exc:  # 渲染异常不应让标的“看起来打不开”，要明确报出来
+            self.title_label.setText(f"{symbol} 渲染失败：{str(exc)[:48]}")
+            self._hint_status(f"图表渲染失败：{symbol} {str(exc)[:120]}")
+            return
         self.symbol_selected.emit(symbol)
         self._refresh_quote(symbol)
 
-    def _on_error(self, msg: str) -> None:
+    def _on_error(self, token: int, symbol: str, msg: str) -> None:
         """取数失败：只在界面内 + 状态栏提示，**不弹模态框**。
 
         离线时该回调会被反复触发（自动刷新、切周期、点自选），
         每次弹 QMessageBox 会让界面变得不可用。
         """
-        self.title_label.setText(f"加载失败：{msg[:60]}")
-        self._hint_status(f"行情加载失败：{msg[:120]}")
+        if token != self._load_token:
+            return
+        self.title_label.setText(f"加载失败：{symbol} — {msg[:48]}")
+        self._hint_status(f"行情加载失败：{symbol} {msg[:120]}")
 
     def _hint_status(self, text: str, timeout: int = 8000) -> None:
         """往主窗口状态栏写一条非阻塞提示（拿不到状态栏则静默）。"""

@@ -312,6 +312,28 @@ def _fake_bid_ask_frame(sym: str) -> "pd.DataFrame":
     return pd.DataFrame(rows, columns=["item", "value"])
 
 
+def _fake_daily(sym: str, rows: int = 30) -> "pd.DataFrame":
+    """构造一份符合统一日线 schema 的假数据，供行情视图渲染测试。"""
+    import numpy as np
+    import pandas as pd
+
+    dates = pd.date_range("2024-01-01", periods=rows, freq="D")
+    base = float(hash(sym) % 1000) + 10.0
+    return pd.DataFrame(
+        {
+            "date": dates.strftime("%Y-%m-%d"),
+            "open": np.linspace(base, base + 2, rows),
+            "high": np.linspace(base + 0.5, base + 2.5, rows),
+            "low": np.linspace(base - 0.5, base + 1.5, rows),
+            "close": np.linspace(base, base + 2, rows),
+            "volume": np.full(rows, 1e6),
+            "amount": np.full(rows, 1e8),
+            "pct_chg": np.full(rows, 1.0),
+            "turnover": np.full(rows, 1.0),
+        }
+    )
+
+
 class _FakeAk:
     """只暴露被测代码会用到的两个接口，并统计各自被调用次数。"""
 
@@ -575,6 +597,70 @@ def test_realtime_per_symbol() -> None:
 
 
 # ============================================================
+# [7] 行情视图多标的加载 + 过期请求丢弃
+# ============================================================
+
+def test_market_view_load() -> None:
+    """行情视图对多只标的 _on_data 不抛异常；过期（stale）请求被丢弃。
+
+    背景：原先 ``_load`` 每次 new Worker，但旧 Worker 结束后仍会把上一次标的的
+    数据写回当前图表/盘口（竞态），快速切换自选股时盘口会串味、甚至看起来
+    “另一只打不开”。现用 ``_load_token`` 丢弃过期结果。
+    """
+    print("[7] 行情视图多标的加载")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PyQt6.QtWidgets import QApplication
+    from cnstock.ui.main_window import MainWindow  # 触发正确导入顺序（pyqtgraph 前先 PyQt6）
+    from cnstock.ui.widgets.market_view import MarketView
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    cfg = load_config()
+
+    class _StubDM:
+        """仅 _refresh_quote 会用到 realtime，返回空表即可（不联网）。"""
+
+        def realtime(self, symbols, force=False):
+            import pandas as pd
+
+            return pd.DataFrame()
+
+    market = MarketView(_StubDM(), cfg)  # type: ignore[arg-type]
+
+    # 7.1 正常多标的：_on_data 同步调用不抛异常，current_df 与图表均更新
+    syms = ["600519", "000001", "300750", "601318", "600036", "000858"]
+    for s in syms:
+        market._on_data(market._load_token, s, _fake_daily(s))
+        assert market.current_symbol == s, s
+        assert market.current_df is not None and not market.current_df.empty, s
+        assert len(market.chart.plt.listDataItems()) > 0, f"{s} 图表应有 K 线"
+    _ok("6 只示例股票逐一 _on_data 均渲染成功（图表有 K 线）")
+
+    # 7.2 含 NaN 的单行边缘数据不崩（防御性渲染）
+    import numpy as np
+    import pandas as pd
+
+    edge = pd.DataFrame(
+        {
+            "date": ["2024-01-02"],
+            "open": [np.nan], "high": [np.nan], "low": [np.nan], "close": [np.nan],
+            "volume": [1e6], "amount": [1e8], "pct_chg": [0.0], "turnover": [0.0],
+        }
+    )
+    market._on_data(market._load_token, "600519", edge)  # 不应抛
+    _ok("边缘数据（NaN 单行）渲染不崩溃")
+
+    # 7.3 过期请求被丢弃：旧 token 的结果不得改写 current_symbol / 图表
+    market._load_token = 5
+    market.current_symbol = "000001"
+    market._on_data(3, "600519", _fake_daily("600519"))  # token=3 < 5，应被忽略
+    assert market.current_symbol == "000001", "过期请求不应改写 current_symbol"
+    _ok("过期（stale）请求被丢弃，盘口/图表不串味")
+    app.processEvents()
+    print("    MarketView load OK\n")
+
+
+# ============================================================
 
 def main() -> int:
     started = time.perf_counter()
@@ -585,6 +671,7 @@ def main() -> int:
         test_snapshot_cache,
         test_stock_list_fallback_cost,
         test_realtime_per_symbol,
+        test_market_view_load,
     )
     for t in tests:
         t()

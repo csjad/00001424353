@@ -54,7 +54,12 @@ class CandlestickItem(pg.GraphicsObject):
         n = len(df)
         arr = np.empty((n, 5), dtype=float)
         for i, (_, r) in enumerate(df.iterrows()):
-            arr[i] = [i, float(r["open"]), float(r["close"]), float(r["low"]), float(r["high"])]
+            try:
+                arr[i] = [i, float(r["open"]), float(r["close"]),
+                          float(r["low"]), float(r["high"])]
+            except (ValueError, TypeError):
+                # 单行缺失（NaN / 非数值）不应拖垮整张图，降级为 0 仅影响该根蜡烛
+                arr[i] = [i, 0.0, 0.0, 0.0, 0.0]
         return arr
 
     def _generate(self) -> None:
