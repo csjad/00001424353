@@ -15,6 +15,17 @@
 
 暗色金融主题、涨红跌绿 A 股配色；K 线 + 均线 + 成交量叠合；盘口实时更新。
 
+### 多只自选股离屏渲染证据（`scripts/_shot.py`）
+
+直接回应「其他示例股票打不开」的真实渲染快照（**离屏、无需联网**）：
+
+| 600519 贵州茅台 | 000001 平安银行 | 300750 宁德时代 |
+|:---:|:---:|:---:|
+| ![贵州茅台](docs/screenshots/market_proof_600519.png) | ![平安银行](docs/screenshots/market_proof_000001.png) | ![宁德时代](docs/screenshots/market_proof_300750.png) |
+
+每只票独立标题 / 独立价格区间 / 独立 K 线形态 / 独立盘口数字——快速切换不串味、不打不开。
+本地重跑：`python scripts/_shot.py`（输出到 `docs/screenshots/market_proof_*.png`）。
+
 ---
 
 ## 功能特性
@@ -142,9 +153,10 @@ cn-stock-desktop/
 │   ├── cli_demo.py    # 命令行回测（无需 GUI）
 │   ├── make_screenshots.py  # README 截图生成（离屏、零联网）
 │   ├── _smoke.py      # 冒烟测试：撮合/回测/绩效（离线可跑）
-│   └── _verify.py     # 回归测试：持久化/视图渲染/缓存/降级/单票快路径（离线可跑）
+│   ├── _verify.py     # 回归测试：持久化/视图渲染/缓存/降级/单票快路径/多标加载（离线可跑）
+│   └── _shot.py       # 离屏渲染证据：多只自选股逐一截图，证明切换不串味（离线可跑）
 ├── docs/
-│   └── screenshots/   # README 截图（00-overview / 01-market / 02-trade / 03-backtest）
+│   └── screenshots/   # README 截图 + 自选股渲染证据（market_proof_*.png）
 ├── launcher.py        # PyInstaller 冻结入口（修复包内相对导入）
 ├── build.py           # PyInstaller 打包脚本（绕过 Windows .bat 中文 codepage 炸）
 ├── run.py             # 首启建 venv + 装依赖 + 启动
@@ -157,7 +169,8 @@ cn-stock-desktop/
 
 > **README 截图如何本地重新生成**：
 > ```bash
-> python scripts/make_screenshots.py   # 输出到 docs/screenshots/
+> python scripts/make_screenshots.py   # 输出到 docs/screenshots/00-03-*.png
+> python scripts/_shot.py              # 输出到 docs/screenshots/market_proof_*.png
 > ```
 > 完全离屏运行、不联网、不写用户真实账户库。
 
