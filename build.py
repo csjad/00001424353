@@ -42,6 +42,46 @@ ROOT = Path(__file__).resolve().parent
 APP_NAME = "A股模拟交易终端"  # 中文 exe 名
 ENTRY = "launcher.py"
 VENV_PY = ROOT / ".venv" / "Scripts" / "python.exe"
+
+# PyInstaller 参数（抽成模块级常量，便于 ../_archive/build_slim_probe.py
+# 之类的一次性分析脚本直接复用，避免两边配置漂移）。
+#
+# 关于 --collect-all 的取舍（实测 2026-08-31：exe 124.7 MB -> 71.3 MB，-42.8%）
+# ---------------------------------------------------------------------------
+# - **不要** ``--collect-all PyQt6``：它会把 PyQt6 安装目录下**整个 Qt6 目录**
+#   塞进包里，包括本项目一个都没用到的
+#
+#       Qt6/qml              2243 个文件 / 13.7 MB   QML 运行时
+#       Qt6/translations      217 个 .qm / 10.1 MB   多语言（本项目只用中文）
+#       Qt6/bin/Qt6Quick*.dll、Qt6Qml、Qt6Designer、Qt6Pdf   约 35 MB
+#       Qt6/bin/avcodec-61、avformat-61...           约 17 MB（QtMultimedia 的 FFmpeg）
+#       Qt6/qsci                                      1.7 MB（QScintilla）
+#
+#   去掉后改由 PyInstaller 官方 PyQt6 hook 按需收集：只收被 import 的
+#   QtCore / QtGui / QtWidgets 三个模块所需的 DLL 与平台插件
+#   （platforms/qwindows、imageformats、styles）。
+#   代码实际用到的 Qt 模块只有 QtCore / QtGui / QtWidgets 三个。
+#
+# - **保留** ``--collect-all pyqtgraph``：pyqtgraph 带一批色表数据文件
+#   （``colors/maps/*.csv``），压缩后只占约 1.2 MB。留着可避免将来用到
+#   ``pg.colormap.get('CET-...')`` 时静默炸掉；另用
+#   ``--exclude-module pyqtgraph.examples`` 剔掉纯示例目录。
+#
+# - PyInstaller 官方 Qt hook 会额外收 ANGLE（libEGL/libGLESv2）和
+#   opengl32sw.dll。PyQt6 6.11 已不带 ANGLE（改走 D3D 后端），
+#   opengl32sw.dll 是 Mesa 软渲染（19.7 MB），是可进一步瘦身的最大单项，
+#   但要改 hook 才能剔除，暂保留。
+PYINSTALLER_BASE_ARGS = [
+    "--noconfirm",
+    "--onefile",
+    "--windowed",
+    "--name", APP_NAME,
+    "--hidden-import", "cnstock",
+    "--collect-all", "pyqtgraph",
+    "--exclude-module", "pyqtgraph.examples",
+    "--collect-all", "akshare",
+    "--collect-all", "tushare",
+]
 # --------------------------
 
 
@@ -91,22 +131,11 @@ def clean_previous() -> None:
 
 
 def run_pyinstaller(py: str) -> int:
-    """用列表参数调 PyInstaller，Unicode 直达。"""
-    cmd = [
-        py,
-        "-m",
-        "PyInstaller",
-        "--noconfirm",
-        "--onefile",
-        "--windowed",
-        "--name", APP_NAME,
-        "--hidden-import", "cnstock",
-        "--collect-all", "pyqtgraph",
-        "--collect-all", "PyQt6",
-        "--collect-all", "akshare",
-        "--collect-all", "tushare",
-        ENTRY,
-    ]
+    """用列表参数调 PyInstaller，Unicode 直达。
+
+    参数取舍详见模块顶部 ``PYINSTALLER_BASE_ARGS`` 的注释。
+    """
+    cmd = [py, "-m", "PyInstaller"] + PYINSTALLER_BASE_ARGS + [ENTRY]
     info("PyInstaller 命令：")
     print("    " + " ".join(f'"{a}"' if " " in a or any(ord(c) > 127 for c in a) else a
                           for a in cmd))
